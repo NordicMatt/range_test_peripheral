@@ -629,11 +629,6 @@ void ble_write_thread(void)
 	uint32_t count = 0;
 
 	for (;;) {
-		// /* Wait indefinitely for data to be sent over bluetooth */
-		// struct uart_data_t *buf = k_fifo_get(&fifo_uart_rx_data,
-		// 				     K_FOREVER);
-
-		
 
 		if (current_conn != NULL){
 
