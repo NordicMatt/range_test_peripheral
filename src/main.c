@@ -54,6 +54,8 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
+static K_SEM_DEFINE(ble_ready_for_data, 0, 1);
+static K_SEM_DEFINE(ble_data_sent, 0, 1);
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
@@ -329,11 +331,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	LOG_INF("Connected %s", log_strdup(addr));
-
+	
 	current_conn = bt_conn_ref(conn);
+	k_sem_give(&ble_ready_for_data);
 
 	dk_set_led_on(CON_STATUS_LED);
+
+	LOG_INF("Connected %s", log_strdup(addr));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -507,8 +511,14 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 	}
 }
 
+static void bt_sent_cb(struct bt_conn *conn)
+{
+	k_sem_give(&ble_data_sent);
+}
+
 static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
+	.sent = bt_sent_cb
 };
 
 void error(void)
@@ -614,8 +624,10 @@ void main(void)
 	}
 
 	for (;;) {
-		dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
-		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+		if (current_conn != NULL){
+			dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
+			k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+		}
 	}
 }
 
@@ -627,34 +639,41 @@ void ble_write_thread(void)
 	k_sem_take(&ble_init_ok, K_FOREVER);
 
 	uint32_t count = 0;
+	char buf[8];
 
 	for (;;) {
 
-		if (current_conn != NULL){
+		if(current_conn){
 
-			k_sleep(K_MSEC(2000));
-			while(current_conn != NULL && send_fail == false){
-				k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
-				char buf[8];
-				count++;
-				sprintf(buf, "%d\r\n", count);
-				if (bt_nus_send(current_conn, buf, sizeof(buf))) {
-					LOG_WRN("Failed to send data over BLE connection");
-					send_fail = true;
-				}
-				else
-				{
+			if (k_sem_take(&ble_ready_for_data, K_MSEC(2000)) == 0) {
+				k_sleep(K_MSEC(2000));
+				
+				while(current_conn){
+					
+					count++;
+					sprintf(buf, "%d\r\n", count);
+					if (bt_nus_send(current_conn, buf, sizeof(buf))) {
+						LOG_WRN("Failed to send data over BLE connection");
+					}
+					else
+					{
+						if (k_sem_take(&ble_data_sent, K_MSEC(2000)) != 0) {
+							LOG_INF("Failed to send");
+						} else {
+							LOG_INF("Sent  %d\n", count);
+						}
+					}
+
 					dk_set_led(DK_LED3, (++blink_status) % 2);
-					LOG_INF("Sent  %d\n", count);
+
+					k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+					
 				}
 			}
-
-			send_fail = false;
-		}else{
-			dk_set_led(DK_LED3, 0);
-			k_sleep(K_MSEC(2000));
 		}
-
+		dk_set_led(DK_LED3, 0);
+		
+		k_sleep(K_MSEC(2000));
 		
 	}
 }
