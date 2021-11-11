@@ -664,7 +664,7 @@ void ble_write_thread(void)
 						if (k_sem_take(&ble_data_sent, K_MSEC(2000)) != 0) {
 							LOG_INF("Failed to send");
 						} else {
-							LOG_INF("Sent  %d\n", count);
+							LOG_INF("Sent  %d", count);
 						}
 					}
 
