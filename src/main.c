@@ -333,7 +333,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 	
 	current_conn = bt_conn_ref(conn);
-	k_sem_give(&ble_ready_for_data);
 
 	dk_set_led_on(CON_STATUS_LED);
 
@@ -375,6 +374,10 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 		LOG_WRN("Security failed: %s level %u err %d", log_strdup(addr),
 			level, err);
 	}
+
+	k_sem_give(&ble_ready_for_data);
+
+
 }
 #endif
 
@@ -645,8 +648,9 @@ void ble_write_thread(void)
 
 		if(current_conn){
 
-			if (k_sem_take(&ble_ready_for_data, K_MSEC(2000)) == 0) {
+			if (k_sem_take(&ble_ready_for_data, K_MSEC(5000)) == 0) {
 				k_sleep(K_MSEC(2000));
+				dk_set_led(DK_LED3, 0);
 				
 				while(current_conn){
 					
