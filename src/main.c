@@ -627,7 +627,7 @@ void main(void)
 	}
 
 	for (;;) {
-		if (current_conn != NULL){
+		if (current_conn == NULL){
 			dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
 			k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
 		}
