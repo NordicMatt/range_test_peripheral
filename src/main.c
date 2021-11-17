@@ -29,6 +29,7 @@
 #include <settings/settings.h>
 
 #include <stdio.h>
+#include <string.h>
 
 #include <logging/log.h>
 
@@ -55,10 +56,14 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
 static K_SEM_DEFINE(ble_ready_for_data, 0, 1);
+static K_SEM_DEFINE(ble_not_ready_for_data, 0, 1);
+static K_SEM_DEFINE(ble_disconnected, 0, 1);
 static K_SEM_DEFINE(ble_data_sent, 0, 1);
+
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
+static uint8_t bt_notif_enabled = 0;
 
 static const struct device *uart;
 static struct k_work_delayable uart_work;
@@ -71,6 +76,7 @@ struct uart_data_t {
 
 static K_FIFO_DEFINE(fifo_uart_tx_data);
 static K_FIFO_DEFINE(fifo_uart_rx_data);
+static K_FIFO_DEFINE(fifo_range_test_data);
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -331,12 +337,11 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	
+	LOG_INF("Connected %s", log_strdup(addr));
+
 	current_conn = bt_conn_ref(conn);
 
 	dk_set_led_on(CON_STATUS_LED);
-
-	LOG_INF("Connected %s", log_strdup(addr));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -344,7 +349,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	char addr[BT_ADDR_LE_STR_LEN];
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
+	
 	LOG_INF("Disconnected: %s (reason %u)", log_strdup(addr), reason);
 
 	if (auth_conn) {
@@ -357,6 +362,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		current_conn = NULL;
 		dk_set_led_off(CON_STATUS_LED);
 	}
+
+	k_sem_give(&ble_disconnected);
 }
 
 #ifdef CONFIG_BT_NUS_SECURITY_ENABLED
@@ -375,9 +382,7 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 			level, err);
 	}
 
-	k_sem_give(&ble_ready_for_data);
-
-
+	//k_sem_give(&ble_ready_for_data);
 }
 #endif
 
@@ -478,6 +483,10 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 
 	LOG_INF("Received data from: %s", log_strdup(addr));
 
+	if (strcmp("Ready", data)){
+			k_sem_give(&ble_ready_for_data);
+	}
+
 	for (uint16_t pos = 0; pos != len;) {
 		struct uart_data_t *tx = k_malloc(sizeof(*tx));
 
@@ -519,9 +528,22 @@ static void bt_sent_cb(struct bt_conn *conn)
 	k_sem_give(&ble_data_sent);
 }
 
+static void bt_send_enabled(enum bt_nus_send_status status){
+
+	if (status == BT_NUS_SEND_STATUS_ENABLED){
+		bt_notif_enabled = 1;
+	}
+	else{
+		bt_notif_enabled = 0;
+	}
+	
+
+}
+
 static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
-	.sent = bt_sent_cb
+	.sent = bt_sent_cb,
+	.send_enabled = bt_send_enabled
 };
 
 void error(void)
@@ -626,61 +648,73 @@ void main(void)
 		return;
 	}
 
+	
+
 	for (;;) {
-		if (current_conn == NULL){
-			dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
-			k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
-		}
+
+		dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
+		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+	
 	}
 }
 
 void ble_write_thread(void)
 {
-	int blink_status = 0;
-	int send_fail = 0;
 	/* Don't go any further until BLE is initialized */
 	k_sem_take(&ble_init_ok, K_FOREVER);
 
-	uint32_t count = 0;
-	char buf[8];
-
 	for (;;) {
+		/* Wait indefinitely for data to be sent over bluetooth */
+		struct uart_data_t *buf = k_fifo_get(&fifo_range_test_data,
+						     K_FOREVER);
 
 		if(current_conn){
-
-			if (k_sem_take(&ble_ready_for_data, K_MSEC(5000)) == 0) {
-				k_sleep(K_MSEC(2000));
-				dk_set_led(DK_LED3, 0);
-				
-				while(current_conn){
-					
-					count++;
-					sprintf(buf, "%d\r\n", count);
-					if (bt_nus_send(current_conn, buf, sizeof(buf))) {
-						LOG_WRN("Failed to send data over BLE connection");
-					}
-					else
-					{
-						if (k_sem_take(&ble_data_sent, K_MSEC(2000)) != 0) {
-							LOG_INF("Failed to send");
-						} else {
-							LOG_INF("Sent  %d", count);
-						}
-					}
-
-					dk_set_led(DK_LED3, (++blink_status) % 2);
-
-					k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
-					
-				}
+			if (bt_nus_send(current_conn, buf->data, buf->len)) {
+				LOG_WRN("Failed to send data over BLE connection");
 			}
 		}
-		dk_set_led(DK_LED3, 0);
-		
-		k_sleep(K_MSEC(2000));
-		
+
+		k_free(buf);
 	}
 }
 
 K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, ble_write_thread, NULL, NULL,
 		NULL, PRIORITY, 0, 0);
+
+void ble_range_test_thread(void)
+{
+	uint32_t count = 0;
+	uint8_t blink_status = 0;
+
+	//k_sem_take(&ble_ready_for_data, K_FOREVER);
+
+	for(;;){
+		LOG_INF("Waiting");
+		k_sleep(K_MSEC(2000));
+		
+		if (bt_notif_enabled == 1){
+			k_sem_take(&ble_ready_for_data, K_FOREVER);
+			k_sleep(K_MSEC(2000));
+			LOG_INF("Begin Data");
+				while(current_conn){
+					count++;
+					struct uart_data_t *data = k_malloc(sizeof(*data));
+					data->len = sprintf(data->data, "%d\r\n", count);
+
+					k_fifo_put(&fifo_range_test_data,data);
+
+					if (k_sem_take(&ble_data_sent, K_MSEC(1000)) != 0) {
+						LOG_INF("Failed to send");
+					} else {
+						LOG_INF("Sent  %d", count);
+					}
+					dk_set_led(DK_LED3, (++blink_status) % 2);
+				 	k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+				}
+		}
+		
+	}
+}
+
+K_THREAD_DEFINE(ble_range_test_thread_id, STACKSIZE, ble_range_test_thread, NULL, NULL,
+		NULL, 13, 0, 0);
